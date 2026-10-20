@@ -28,10 +28,20 @@ def _is_duration(line: str) -> bool:
     return bool(SHORT_DURATION_RE.match(line)) or (bool(DURATION_RE.search(line)) and len(line) < 40)
 
 
+_LABELLED = re.compile(r"^\W*(?:technolog\w*|tech\w*\s*stack|tools|environment|skills?|responsibilit\w+|achievements?|"
+                       r"description|location)\s*:", re.I)
+_SMALL = {"of", "and", "at", "in", "for", "the", "&", "to", "a", "an", "as", "on", "pvt", "ltd", "by", "with", "|", "-", "–"}
+
+
 def _title_like(line: str) -> bool:
     """Short, capitalised, non-sentence line: plausibly a job title or company name."""
-    return (0 < len(line) <= 60 and len(line.split()) <= 7 and line[0].isupper()
-            and not line.endswith((".", ";", ",")) and not DURATION_RE.search(line))
+    if not (0 < len(line) <= 60 and len(line.split()) <= 7 and line[0].isupper()
+            and not line.endswith((".", ";", ",")) and not DURATION_RE.search(line)) or _LABELLED.match(line):
+        return False
+    if ROLE_RE.match(line):
+        return True
+    # a bullet such as "Handled customer calls" is not a heading: its words are not capitalised
+    return not any(w[0].islower() and w.lower() not in _SMALL for w in line.split() if w[0].isalpha())
 
 
 def _bounds_to_groups(lines: list[str], starts: list[int]) -> list[list[str]]:

@@ -7,11 +7,11 @@ Design rules
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
 from . import config, geo
+from .sectioning import HEADING_RE as _HEADING_RE, clean as _clean_line, is_heading as _is_heading
 from .fields import empty_fields
 from .jobs import group_lines, join_jobs
 from .ocr_engine import OcrLine
@@ -37,6 +37,9 @@ class ExtractionResult:
     values: dict[str, str] = field(default_factory=empty_fields)
     evidence: dict[str, Evidence] = field(default_factory=dict)
     conflicts: dict[str, list[str]] = field(default_factory=dict)
+    education: list = field(default_factory=list)   # list[EducationRecord]
+    experience: list = field(default_factory=list)  # list[ExperienceRecord]
+    notes: list[str] = field(default_factory=list)  # e.g. 'No professional experience found.'
 
     def evidence_dict(self) -> dict[str, dict]:
         return {k: e.to_dict() for k, e in self.evidence.items()}
@@ -65,16 +68,7 @@ INDIAN_STATES = [
     "The Dadra and Nagar Haveli and Daman and Diu",
 ]
 
-HEADING_WORDS = (
-    r"(?:career\s+)?objectives?|professional\s+summary|summary|profile(?:\s+summary)?|about\s+me|"
-    r"(?:key|technical|core|professional)?\s*skills?(?:\s+summary)?|work\s+experience|"
-    r"professional\s+experience|employment(?:\s+(?:history|details))?|experience|internships?|"
-    r"education(?:al)?(?:\s+(?:qualifications?|details))?|academics?|qualifications?|projects?|"
-    r"certifications?|achievements?|awards?|personal\s+(?:details|information|profile)|languages?(?:\s+known)?|"
-    r"hobbies|interests?|declaration|references?|contact(?:\s+(?:details|information))?|"
-    r"strengths?|extra[\s-]?curricular(?:\s+activities)?|training"
-)
-HEADING_RE = re.compile(rf"^\W*(?:{HEADING_WORDS})\W*$", re.I)
+HEADING_RE = _HEADING_RE
 
 NAME_BLOCK = re.compile(
     r"\b(resume|curriculum|vitae|cv|profile|contact|address|email|phone|mobile|objective|skills?|education|"
@@ -86,15 +80,14 @@ DEGREE_PATTERNS = {
                       r"matriculation|secondary\s+school(?:\s+certificate)?|high\s+school)\b", re.I),
     "hsc": re.compile(r"\b(?:H\.?\s?S\.?\s?C\.?|12th|XII|class\s*(?:XII|12)|higher\s+secondary|senior\s+secondary|"
                       r"intermediate|\+2|plus\s*two)\b", re.I),
-    "post_graduation": re.compile(r"\b(?:M\.?\s?Tech|M\.?\s?E\.|M\.?\s?Sc|MBA|MCA|M\.?\s?Com|M\.\s?A\.?|(?-i:MA)|M\.?\s?Pharm|"
-                                  r"PGDM|Master(?:s)?\s+of|Post[\s-]?Graduat\w*)(?=\s|$|[,/(\-])", re.I),
-    "graduation": re.compile(r"\b(?:B\.?\s?Tech|B\.?\s?E\.|B\.?\s?Sc|B\.?\s?Com|BCA|BBA|B\.\s?A\.?|(?-i:BA)|B\.?\s?Pharm|"
-                             r"B\.?\s?Arch|Bachelor(?:s)?\s+of|Graduat\w*)(?=\s|$|[,/(\-])", re.I),
+    "post_graduation": re.compile(r"\b(?:M\.?\s?Tech|M\.?\s?E\.|M\.?\s?Sc|MBA|MCA|M\.?\s?Com|M\.?\s?A\.|M\.?\s?Pharm|"
+                                  r"PGDM|Master(?:s)?\s+of|Post[\s-]?Graduat\w*)\b", re.I),
+    "graduation": re.compile(r"\b(?:B\.?\s?Tech|B\.?\s?E\.|B\.?\s?Sc|B\.?\s?Com|BCA|BBA|B\.?\s?A\.|B\.?\s?Pharm|"
+                             r"B\.?\s?Arch|Bachelor(?:s)?\s+of|Graduat\w*)\b", re.I),
     "higher": re.compile(r"\b(?:Ph\.?\s?D|Doctorate|Diploma|Post\s+Graduate\s+Diploma)\b", re.I),
 }
 BOARD_RE = re.compile(r"\b((?:[A-Z][A-Za-z.&]+\s+){0,4}(?:Board|CBSE|ICSE|ISC|NIOS)\b(?:\s+of\s+[A-Z][A-Za-z ]+)?)")
-UNIVERSITY_RE = re.compile(r"[^,|]*\b(?:University|Institute|College|School|Academy|Autonomous|Vidyapeeth|IIT|NIT)\b[^,|]*", re.I)
-MARKS_RE = re.compile(r"(?<!\d)(\d{1,4}(?:,\d{3})?(?:\.\d{1,2})?)\s*/\s*(\d{1,4}(?:,\d{3})?(?:\.\d{1,2})?)(?!\d)")
+UNIVERSITY_RE = re.compile(r"[^,|]*\b(?:University|Institute|College|Autonomous|Vidyapeeth|IIT|NIT)\b[^,|]*", re.I)
 
 LABELS = {
     "name": r"(?:full\s+|candidate\s+)?name",
@@ -118,16 +111,7 @@ GENDER_VALUES = {"male": "Male", "female": "Female", "m": "Male", "f": "Female",
                  "transgender": "Transgender", "non-binary": "Non-binary"}
 
 
-def _clean(line: str) -> str:
-    return re.sub(r"\s+", " ", line).strip(" \t•·▪●◦*-–—|")
-
-
-NOT_INSTITUTION_RE = re.compile(
-    r"^\W*\d+(?:\.\d+)?\s*(?:years?|yrs?|months?)\W*$|^\W*worked\s+as\b|^\W*role\s*:", re.I)
-
-
-def _is_heading(line: str) -> bool:
-    return len(line) < 45 and bool(HEADING_RE.match(line))
+_clean = _clean_line
 
 
 class _Extractor:
@@ -349,242 +333,29 @@ class _Extractor:
         return 2 <= len(words) <= 4 and all(re.fullmatch(r"[A-Za-z][A-Za-z.'’-]*", w) for w in words) \
             and all(len(w.strip(".")) >= 1 for w in words)
 
-    def education(self) -> None:
-        """Extract qualification-specific records plus legacy flat fields.
+    def structured(self, lines: list[OcrLine], today) -> None:
+        """Education + experience as separate records; legacy flat fields are derived from them."""
+        from .education import extract_education
+        from .experience import extract_experience
+        from .records import education_to_flat
 
-        Context is gathered around each qualification anchor, rather than assuming
-        all relevant values occur after the anchor. This handles common resume
-        layouts where the institution is printed immediately before the class/degree.
-        """
-        row_templates = [
-            {"qualification": "SSC / Class 10"},
-            {"qualification": "HSC / Class 12"},
-            {"qualification": "Diploma"},
-            {"qualification": "Graduation"},
-            {"qualification": "Post-graduation"},
-            {"qualification": "Higher education"},
-        ]
-        records = [dict(
-            qualification=x["qualification"], degree="", institution="", board_awarding_body="",
-            stream="", start_year="", passing_year="", expected_completion_year="", status="",
-            marks_obtained="", maximum_marks="", percentage="", cgpa="", grade="", result=""
-        ) for x in row_templates]
+        edu = extract_education(lines, today)
+        exp, notes = extract_experience(lines, today)
+        self.out.education, self.out.experience, self.out.notes = edu, exp, notes
+        for key, value in education_to_flat(edu).items():
+            if value:
+                rec = next((r for r in edu if key.startswith(r.level) or
+                            (key == "higher_level_education" and r.level in ("diploma", "higher"))), edu[0])
+                self.out.values[key] = value
+                self.out.evidence[key] = Evidence(rec.source_index, "", rec.source_text[:140], rec.confidence,
+                                                  0.5 if rec.confidence == "low" and any("OCR" in n for n in rec.notes)
+                                                  else 1.0)
+        if exp:
+            from .jobs import join_jobs
+            self.out.values["employment_details"] = join_jobs([r.as_text() for r in exp])
+            self.out.evidence["employment_details"] = Evidence(exp[0].source_index, "", exp[0].source_text[:140],
+                                                                exp[0].confidence, 1.0)
 
-        # Limit education anchors to the education section when headings are present.
-        edu_start = next((i for i, t in enumerate(self.texts)
-                          if re.fullmatch(r"\W*(?:education|educational qualifications?|academic qualifications?|academics?)\W*", t, re.I)), -1)
-        edu_end = len(self.texts)
-        if edu_start >= 0:
-            for j in range(edu_start + 1, len(self.texts)):
-                if _is_heading(self.texts[j]) and not re.search(r"education|academic|qualification", self.texts[j], re.I):
-                    edu_end = j
-                    break
-            search_range = range(edu_start + 1, edu_end)
-        else:
-            search_range = range(len(self.texts))
-
-        def classify_education_line(text: str) -> str | None:
-            # Prefer explicit qualification labels. Generic phrases such as
-            # "Senior Secondary School" are often part of an institution name,
-            # not a qualification record, and must not steal the HSC anchor.
-            if re.search(r"\bpost[ -]?graduate diploma\b", text, re.I):
-                return "higher"
-            if re.search(r"\b(?:H\.?S\.?C\.?|12th|XII|class\s*12|intermediate|\+2|plus\s*two|higher secondary)\b", text, re.I):
-                return "hsc"
-            if re.search(r"\b(?:S\.?S\.?C\.?|SSLC|10th|class\s*10|class\s*X|matriculation|secondary school certificate)\b", text, re.I):
-                return "ssc"
-            if DEGREE_PATTERNS["post_graduation"].search(text):
-                return "post_graduation"
-            if DEGREE_PATTERNS["graduation"].search(text):
-                return "graduation"
-            if re.search(r"\bDiploma\b", text, re.I):
-                return "diploma"
-            if re.search(r"\b(?:Ph\.?D|Doctorate)\b", text, re.I):
-                return "higher"
-            # Generic level phrases count only when the line itself has qualification
-            # evidence, not when it is simply an institution name.
-            if re.search(r"\b(?:senior secondary|high school|secondary school)\b", text, re.I):
-                if not re.search(r"\b(?:school|college|academy)\b", text, re.I) or (
-                    YEAR_RE.search(text) or PERCENT_RE.search(text) or BOARD_RE.search(text)):
-                    return "hsc" if re.search(r"senior secondary", text, re.I) else "ssc"
-            return None
-
-        anchors: list[tuple[int, str]] = []
-        for i in search_range:
-            text = self.texts[i]
-            if _is_heading(text):
-                continue
-            kind = classify_education_line(text)
-            if kind:
-                anchors.append((i, kind))
-
-        # Layout: many resumes print the institution on the line BEFORE the qualification
-        # ("IMS Noida / Pursuing BA 3rd Year / Diwakar Model School / 12th passed ...").
-        def plausible_institution(j: int) -> bool:
-            if j < 0 or j >= len(self.texts):
-                return False
-            t = self.texts[j]
-            return not (_is_heading(t) or classify_education_line(t) is not None or NOT_INSTITUTION_RE.search(t)
-                        or YEAR_RE.search(t) or PERCENT_RE.search(t) or CGPA_RE.search(t) or len(t) < 3
-                        or re.fullmatch(r"\W*(?:CBSE|ICSE|ISC|NIOS)\W*", t, re.I))
-
-        inst_first = False
-        if anchors:
-            first_i, last_i = anchors[0][0], anchors[-1][0]
-            lead = first_i - 1 >= (edu_start + 1 if edu_start >= 0 else 0) and plausible_institution(first_i - 1)
-
-            trail = last_i + 1 < edu_end and plausible_institution(last_i + 1)
-            inst_first = lead and not trail
-        claimed: set[int] = set()
-        anchor_idx = [a[0] for a in anchors]
-
-        def institution_above(idx: int) -> int | None:
-            """Nearest institution line above an anchor, skipping stray durations / page counters."""
-            for j in range(idx - 1, max(idx - 4, -1), -1):
-                if j in anchor_idx or _is_heading(self.texts[j]):
-                    return None
-                if NOT_INSTITUTION_RE.search(self.texts[j]) or re.fullmatch(r"\W*\d{1,2}\W*", self.texts[j]):
-                    continue
-                return j if plausible_institution(j) else None
-            return None
-
-        # Include only one anchor per legacy level; table has one canonical row per level.
-        used: set[str] = set()
-        kind_to_record = {
-            "ssc": 0, "hsc": 1, "diploma": 2, "graduation": 3,
-            "post_graduation": 4, "higher": 5,
-        }
-        for pos, (idx, kind) in enumerate(anchors):
-            if kind in used:
-                continue
-            # Nearby lines before and after the anchor can carry institution, board,
-            # grade, and status. Stop at another qualification or section heading.
-            prev_idx = idx - 1
-            start_idx = idx
-            if prev_idx >= 0 and not _is_heading(self.texts[prev_idx]):
-                previous_line = self.texts[prev_idx]
-                previous_is_institution = bool(re.search(r"\b(?:college|university|institute|vidyapeeth|IIT|NIT)\b", previous_line, re.I))
-                # A school immediately before SSC/HSC usually belongs to that row;
-                # a college immediately before HSC often belongs to the prior degree.
-                if classify_education_line(previous_line) is None and (
-                    not previous_is_institution or kind in ("graduation", "post_graduation", "diploma", "higher")
-                ):
-                    start_idx = prev_idx
-            end_idx = min(len(self.texts), idx + 4)
-            if inst_first:  # the line before the next qualification belongs to that qualification
-                nxt = next((a for a in anchor_idx if a > idx), None)
-                if nxt is not None:
-                    nxt_inst = institution_above(nxt)
-                    end_idx = min(end_idx, max(idx + 1, nxt_inst if nxt_inst is not None else nxt))
-                above = institution_above(idx)
-                start_idx = above if above is not None and above not in claimed else idx
-            for j in range(idx + 1, end_idx):
-                if _is_heading(self.texts[j]) or classify_education_line(self.texts[j]) is not None:
-                    end_idx = j
-                    break
-            window = self.texts[start_idx:end_idx]
-            blob = " | ".join(window)
-            board_match = BOARD_RE.search(blob)
-            percent_match = PERCENT_RE.search(blob)
-            cgpa_match = CGPA_RE.search(blob)
-            marks_match = MARKS_RE.search(blob)
-            years = YEAR_RE.findall(blob)
-            status_match = re.search(r"\b(pursuing|currently studying|in progress|appearing|final year|completed|graduated|passed|ongoing)\b", blob, re.I)
-            status = ""
-            if status_match:
-                token = status_match.group(1).lower()
-                status = "Pursuing" if token in {"pursuing", "currently studying", "in progress", "final year", "ongoing"} else (
-                    "Appearing" if token == "appearing" else "Completed")
-
-            # Prefer a named institution line; do not mistake board/grade/date lines for it.
-            institution = ""
-            institution_line_idx = None
-            if inst_first and start_idx < idx:
-                institution, institution_line_idx = self.texts[start_idx].strip(" ,|:-"), start_idx
-                m = UNIVERSITY_RE.search(institution)
-                if m and m.group(0).strip(" ,|:-"):
-                    institution = m.group(0).strip(" ,|:-")
-            for j in ([] if institution else range(start_idx, end_idx)):
-                line = self.texts[j]
-                if j in claimed or NOT_INSTITUTION_RE.search(line):
-                    continue
-                if board_match and board_match.group(1).lower() in line.lower() and not re.search(
-                        r"school|college|university|institute", line, re.I):
-                    continue
-                match = UNIVERSITY_RE.search(line)
-                if match and not re.search(r"\b(?:board|CBSE|ICSE|ISC|NIOS)\b", line, re.I):
-                    candidate = match.group(0).strip(" ,|:-")
-                    if candidate and not re.fullmatch(r"(?:school|college|university|institute)", candidate, re.I):
-                        institution = candidate
-                        institution_line_idx = j
-                        break
-            if not institution:
-                # In a compact education row, the line next to the qualification may
-                # be the institution even if its name has no "school/college" suffix.
-                for j in range(start_idx, end_idx):
-                    line = self.texts[j]
-                    if j == idx or j in claimed or NOT_INSTITUTION_RE.search(line) or _is_heading(line) or re.search(
-                        r"\b(?:CBSE|ICSE|ISC|NIOS|Board|CGPA|GPA|CPI|SGPA|percentage|marks?|result|pursuing|completed|appearing)\b",
-                        line, re.I) or YEAR_RE.search(line) or PERCENT_RE.search(line) or CGPA_RE.search(line):
-                        continue
-                    if len(line) >= 3:
-                        institution, institution_line_idx = line.strip(" ,|:-"), j
-                        break
-
-            if institution_line_idx is not None:
-                claimed.add(institution_line_idx)
-            rec = records[kind_to_record[kind]]
-            degree_text = self.texts[idx].strip(" ,|:-")
-            degree_text = re.sub(r"\s*[\(\[]?\b(?:19|20)\d{2}\b.*$", "", degree_text).strip(" ,|:-")
-            degree_text = re.sub(r"\s+(?:final year|currently studying|pursuing|appearing)$", "", degree_text, flags=re.I).strip()
-            degree_text = re.sub(r"^(?:pursuing|currently studying|appearing|completed)\s+", "", degree_text, flags=re.I)
-            degree_text = re.sub(r"\s*(\d(?:st|nd|rd|th)\s+year)$", r" (\1)", degree_text, flags=re.I).strip()
-            rec["degree"] = degree_text if kind in ("diploma", "graduation", "post_graduation", "higher") else ""
-            rec["institution"] = institution
-            board_value = board_match.group(1).strip() if board_match else ""
-            board_value = re.sub(r"^(?:SSC|HSC|10th|12th|Class\s*(?:X|10|XII|12))\s+", "", board_value, flags=re.I)
-            rec["board_awarding_body"] = board_value
-            rec["stream"] = ""
-            rec["status"] = status
-            pursuing = bool(re.search(r"\b(pursuing|currently studying|in progress|final year|ongoing)\b", blob, re.I))
-            if pursuing and years:
-                rec["start_year"] = years[0] if len(years) >= 2 else ""
-                rec["expected_completion_year"] = years[-1]
-            elif years:
-                rec["passing_year"] = years[-1]
-                if len(years) >= 2:
-                    rec["start_year"] = years[0]
-            rec["marks_obtained"] = marks_match.group(1) if marks_match and not re.search(r"\b(?:CGPA|GPA|CPI|SGPA)\b", blob, re.I) else ""
-            rec["maximum_marks"] = marks_match.group(2) if rec["marks_obtained"] else ""
-            rec["percentage"] = percent_match.group(0).replace(" ", "") if percent_match else ""
-            rec["cgpa"] = cgpa_match.group(0).strip() if cgpa_match else ""
-            grade_match = re.search(r"\b(?:grade|class)\s*[:\-]?\s*([A-F][+-]?|Distinction|First Class|Second Class)\b", blob, re.I)
-            rec["grade"] = grade_match.group(1) if grade_match else ""
-            rec["result"] = rec["percentage"] or rec["cgpa"] or (
-                f"{rec['marks_obtained']}/{rec['maximum_marks']}" if rec["marks_obtained"] else rec["grade"])
-            used.add(kind)
-
-            # Backward-compatible scalar fields used by existing forms and history.
-            if kind in ("ssc", "hsc"):
-                prefix = kind
-                result_value = rec["result"]
-                self._set(f"{prefix}_result", result_value, idx, MEDIUM, snippet=blob)
-                self._set(f"{prefix}_board", rec["board_awarding_body"], idx, MEDIUM, snippet=blob)
-                self._set(f"{prefix}_pass_year", rec["passing_year"] or rec["expected_completion_year"], idx, MEDIUM, snippet=blob)
-            elif kind in ("graduation", "post_graduation"):
-                self._set(f"{kind}_degree", rec["degree"], idx, MEDIUM, snippet=blob)
-                self._set(f"{kind}_result", rec["result"], idx, MEDIUM, snippet=blob)
-                self._set(f"{kind}_university", rec["institution"], institution_line_idx if institution_line_idx is not None else idx,
-                          MEDIUM, snippet=blob)
-                self._set(f"{kind}_year", rec["passing_year"] or rec["expected_completion_year"], idx, MEDIUM, snippet=blob)
-            elif kind in ("higher", "diploma"):
-                self._set("higher_level_education", rec["degree"] or blob, idx, MEDIUM, snippet=blob)
-
-        # Keep structured rows for the UI/history without changing the existing DB schema:
-        # fields are already stored as JSON and unknown/new keys remain backward compatible.
-        if anchors:
-            self._set("qualification_records", json.dumps(records, ensure_ascii=False), anchors[0][0],
-                      MEDIUM, snippet="Structured qualification records extracted from OCR")
     def sections(self) -> None:
         for key, start in (("objectives", r"(?:career\s+)?objectives?"),
                            ("summary", r"(?:professional\s+)?summary|profile(?:\s+summary)?|about\s+me"),
@@ -596,19 +367,24 @@ class _Extractor:
                 self._set(key, join_jobs(jobs), i + 1, LOW if len(jobs) > 1 else MEDIUM, snippet=body[0])
             elif body:
                 self._set(key, "\n".join(body), i + 1, MEDIUM, snippet=body[0])
+        for key, start in (("certifications", r"certifications?"), ("projects", r"(?:academic\s+)?projects?"),
+                           ("academic_achievements", r"(?:academic\s+)?achievements?|awards?")):
+            i, body = self._section(start)
+            if body:
+                self._set(key, "\n".join(body), i + 1, MEDIUM, snippet=body[0])
         i, body = self._section(r"(?:key|technical|core|professional)?\s*skills?(?:\s+summary)?")
         if body:
             self._set("key_skills", "\n".join(f"• {b.lstrip('•-*· ')}" for b in body), i + 1, MEDIUM, snippet=body[0])
 
 
-def extract(lines: list[OcrLine]) -> ExtractionResult:
+def extract(lines: list[OcrLine], today=None) -> ExtractionResult:
     """Extract candidate fields from OCR lines (reading order, across all screenshots)."""
     ex = _Extractor(lines)
     ex.contacts()
     ex.personal()
     ex.pincode_and_address()
-    ex.education()
     ex.sections()
+    ex.structured(lines, today)
     return ex.out
 
 

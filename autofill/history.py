@@ -6,6 +6,7 @@ from datetime import date
 from .db import HistoryRepository, HistorySummary
 from .fields import normalize_fields
 from .geo import fill_location
+from .records import sync_flat
 from .validation import ValidationReport, validate
 
 
@@ -18,7 +19,7 @@ def save_candidate(repo: HistoryRepository, fields: dict, raw_text: str, source_
                    evidence: dict | None = None, report: ValidationReport | None = None,
                    instruction: str = "", existing_id: int | None = None) -> int:
     """Insert a new history entry, or update ``existing_id`` (prevents duplicate saves of one draft)."""
-    clean = fill_location(normalize_fields(fields))  # blank city/state <- pincode
+    clean = sync_flat(fill_location(normalize_fields(fields)))  # city/state <- pincode; flat <- records
     name = candidate_name(clean)
     review = (report or validate(clean)).to_dict()
     if existing_id is not None and repo.update_fields(existing_id, name, clean, review):

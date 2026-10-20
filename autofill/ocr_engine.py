@@ -47,6 +47,7 @@ class OcrLine:
     bbox: tuple[int, int, int, int] | None = None  # x0, y0, x1, y1 in preprocessed pixels
     source_index: int = 0  # 1-based screenshot number
     source_name: str = ""
+    page: int = 0  # 1-based PDF page, 0 for screenshots
 
 
 def _poly_to_bbox(poly: Any) -> tuple[int, int, int, int] | None:
@@ -137,41 +138,6 @@ def _build_paddle_ocr():
             kwargs.pop(dropped)
 
 
-class RapidOcrBackend:
-    """RapidOCR (ONNX Runtime) with a PaddleOCR-shaped ``predict`` so the rest of the app is unchanged."""
-
-    parallel_safe = True
-
-    def __init__(self, threads_per_job: int):
-        from rapidocr_onnxruntime import RapidOCR  # imported lazily
-
-        try:
-            self._ocr = RapidOCR(intra_op_num_threads=threads_per_job, inter_op_num_threads=1)
-        except Exception:
-            self._ocr = RapidOCR()
-
-    def predict(self, array: Any) -> list[dict]:
-        result, _ = self._ocr(array, use_cls=False)  # screenshots are upright: skip the angle model
-        rows = result or []
-        return [{"res": {"rec_texts": [r[1] for r in rows], "rec_scores": [float(r[2]) for r in rows],
-                         "rec_polys": [r[0] for r in rows]}}]
-
-
-def _rapidocr_available() -> bool:
-    try:
-        import rapidocr_onnxruntime  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def _default_factory():
-    if config.OCR_BACKEND == "rapidocr" or (config.OCR_BACKEND == "auto" and _rapidocr_available()):
-        threads = max(1, (os.cpu_count() or 2) // max(1, config.OCR_WORKERS))
-        return RapidOcrBackend(threads)
-    return _build_paddle_ocr()
-
-
 class OcrCache:
     """Tiny thread-safe LRU so re-clicking Extract on the same screenshots is instant."""
 
@@ -202,22 +168,15 @@ class OcrEngine:
     """Lazy, thread-safe PaddleOCR singleton. Pass ``factory`` to inject a fake in tests."""
 
     def __init__(self, factory: Callable[[], Any] | None = None):
-        self._factory = factory or _default_factory
+        self._factory = factory or _build_paddle_ocr
         self._ocr: Any = None
         self._lock = threading.Lock()
-        self._init_lock = threading.RLock()
         self.cache = OcrCache()
 
     def _get(self):
         if self._ocr is None:
-            with self._init_lock:
-                if self._ocr is None:
-                    self._ocr = self._factory()
+            self._ocr = self._factory()
         return self._ocr
-
-    @property
-    def parallel_safe(self) -> bool:
-        return bool(getattr(self._get(), "parallel_safe", False))
 
     def warm_up(self) -> None:
         """Load models and run one tiny inference so the first real click is fast."""
@@ -233,12 +192,6 @@ class OcrEngine:
             if hit is not None:
                 return hit
         array = to_bgr_array(image)
-        backend = self._get()
-        if getattr(backend, "parallel_safe", False):  # ONNX sessions can be shared across threads
-            lines = parse_paddle_result(backend.predict(array))
-            if cache_key:
-                self.cache.put(cache_key, lines)
-            return lines
         with self._lock:  # Paddle inference objects are not safe for concurrent use
             try:
                 result = self._get().predict(array)

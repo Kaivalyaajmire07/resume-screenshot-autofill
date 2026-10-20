@@ -56,29 +56,3 @@ def test_progress_callback(fake_engine, png_bytes):
     seen = []
     process([Att("a.png", png_bytes())], fake_engine, progress=lambda d, t: seen.append((d, t)))
     assert seen == [(1, 1)]
-
-
-def test_parallel_ocr_keeps_upload_order(png_bytes):
-    class ParallelFake(FakeOcr):
-        parallel_safe = True
-
-    texts = {"a": ["Email: a@x.com"], "b": ["Email: b@x.com"], "c": ["Email: c@x.com"]}
-    calls = iter(["a", "b", "c"])
-    import threading
-    lock = threading.Lock()
-
-    class Eng(ParallelFake):
-        def predict(self, array):
-            with lock:
-                self.texts = texts[next(calls)]
-            return super().predict(array)
-
-    eng = OcrEngine(factory=lambda: Eng())
-    old = config.OCR_WORKERS
-    config.OCR_WORKERS = 3
-    try:
-        res = process([Att(f"{i}.png", png_bytes(c)) for i, c in enumerate(["white", "gray", "black"])], eng)
-    finally:
-        config.OCR_WORKERS = old
-    assert res.images_ok == 3 and [n for n, _ in res.image_seconds] == ["0.png", "1.png", "2.png"]
-    assert sorted({ln.source_index for ln in res.lines}) == [1, 2, 3]

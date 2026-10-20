@@ -15,9 +15,10 @@ FIELDS = [
     ("post_graduation_result", "Post Graduation Result"),
     ("post_graduation_university", "Post Graduation University"),
     ("post_graduation_year", "Post Graduation Year"), ("higher_level_education", "Higher Level Education"),
-    ("qualification_records", "Structured Qualification Records"),
     ("objectives", "Objectives"), ("summary", "Summary"), ("key_skills", "Key Skills"),
     ("employment_details", "Employment Details"),
+    ("certifications", "Certifications"), ("projects", "Projects"),
+    ("academic_achievements", "Academic Achievements"),
 ]
 LABELS = dict(FIELDS)
 FIELD_KEYS = [k for k, _ in FIELDS]
@@ -26,12 +27,17 @@ GROUPS = {
     "Personal Details": ["first_name", "middle_name", "last_name", "date_of_birth", "gender", "nationality",
                          "marital_status", "passport", "hobbies", "language_known"],
     "Communication Details": ["address", "landmark", "city", "state", "pincode", "mobile", "email"],
-    "Qualification Details": ["qualification_records"],
-    "Employment & Profile": ["objectives", "summary", "employment_details", "key_skills"],
+    "Qualification Details": ["ssc_result", "ssc_board", "ssc_pass_year", "hsc_result", "hsc_board",
+                              "hsc_pass_year", "graduation_degree", "graduation_result",
+                              "graduation_university", "graduation_year", "post_graduation_degree",
+                              "post_graduation_result", "post_graduation_university", "post_graduation_year",
+                              "higher_level_education"],
+    "Employment & Profile": ["objectives", "summary", "employment_details", "key_skills", "certifications",
+                             "projects", "academic_achievements"],
 }
 
 LONG_TEXT_FIELDS = {"objectives", "summary", "employment_details", "key_skills", "address",
-                    "hobbies", "language_known"}
+                    "hobbies", "language_known", "certifications", "projects", "academic_achievements"}
 TALL_FIELDS = {"employment_details", "summary", "objectives"}
 
 # Fields that must be present for a usable candidate record.
@@ -42,10 +48,17 @@ def empty_fields() -> dict[str, str]:
     return {k: "" for k in FIELD_KEYS}
 
 
+# Structured records travel inside the same dict as JSON strings (see records.py).
+STRUCTURED_KEYS = ("education_records", "experience_records")
+
+
 def normalize_fields(values: dict | None) -> dict[str, str]:
-    """Return a complete, string-only field dict (tolerates older/partial stored records)."""
+    """Return a complete, string-only field dict (tolerates older/partial stored records).
+
+    The structured-record keys are kept only when present, so old rows stay unchanged.
+    """
     out = empty_fields()
     for k, v in (values or {}).items():
-        if k in out:
+        if k in out or k in STRUCTURED_KEYS:
             out[k] = "" if v is None else str(v)
     return out

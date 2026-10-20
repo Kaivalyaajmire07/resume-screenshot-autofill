@@ -20,6 +20,8 @@ _MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "j
 @dataclass
 class ValidationReport:
     issues: dict[str, list[str]] = field(default_factory=dict)  # field -> reasons (needs review)
+    record_issues: dict[str, list[str]] = field(default_factory=dict)  # "education:0" / "experience:1" -> reasons
+    notes: list[str] = field(default_factory=list)  # document-level notes, e.g. "No professional experience found."
     blank: list[str] = field(default_factory=list)  # fields not found
 
     def add(self, key: str, message: str) -> None:
@@ -27,12 +29,17 @@ class ValidationReport:
         if message not in self.issues[key]:
             self.issues[key].append(message)
 
+    def add_record(self, key: str, message: str) -> None:
+        self.record_issues.setdefault(key, [])
+        if message not in self.record_issues[key]:
+            self.record_issues[key].append(message)
+
     @property
     def flagged(self) -> set[str]:
         return set(self.issues)
 
     def to_dict(self) -> dict:
-        return {"issues": self.issues, "blank": self.blank}
+        return {"issues": self.issues, "blank": self.blank, "record_issues": self.record_issues, "notes": self.notes}
 
 
 def parse_dob(value: str) -> date | None:
@@ -124,8 +131,10 @@ def validate(values: dict[str, str], extraction: ExtractionResult | None = None,
             if ev.ocr_score < config.OCR_REVIEW_SCORE:
                 rep.add(key, f"Low OCR confidence ({ev.ocr_score:.2f})")
 
+    _validate_records(values, extraction, rep, today)
+
     # --- completeness
-    rep.blank = [k for k in FIELD_KEYS if k != "qualification_records" and not v[k]]
+    rep.blank = [k for k in FIELD_KEYS if not v[k]]
     for key in CORE_FIELDS:
         if not v[key]:
             rep.add(key, "Not found — left blank")
@@ -134,3 +143,66 @@ def validate(values: dict[str, str], extraction: ExtractionResult | None = None,
 
 def describe(key: str, report: ValidationReport) -> str:
     return f"{LABELS[key]}: " + "; ".join(report.issues.get(key, []))
+
+
+def _num(text: str) -> float | None:
+    m = re.search(r"\d+(?:\.\d+)?", text or "")
+    return float(m.group(0)) if m else None
+
+
+def _validate_records(values: dict, extraction: ExtractionResult | None, rep: ValidationReport, today: date) -> None:
+    from .records import education_from_fields, experience_from_fields, LEVEL_LABELS
+
+    edu = education_from_fields(values) or (list(extraction.education) if extraction else [])
+    exp = experience_from_fields(values) or (list(extraction.experience) if extraction else [])
+    for i, r in enumerate(edu):
+        key = f"education:{i}"
+        for n in r.notes:
+            rep.add_record(key, n)
+        pct, cg = _num(r.percentage), _num(r.cgpa)
+        if r.percentage and (pct is None or not 0 < pct <= 100):
+            rep.add_record(key, "Percentage is outside 0–100.")
+        if r.cgpa and cg is not None:
+            scale = _num(r.cgpa.split("/", 1)[1]) if "/" in r.cgpa else 10
+            if cg <= 0 or cg > (scale or 10):
+                rep.add_record(key, f"CGPA {r.cgpa} is outside the 0–{scale:g} scale.")
+        mo, mx = _num(r.marks_obtained), _num(r.max_marks)
+        if mo is not None and mx is not None and mo > mx:
+            rep.add_record(key, "Marks obtained exceed the maximum marks.")
+        for f in ("start_year", "passing_year", "expected_year"):
+            y = _num(getattr(r, f))
+            if y is not None and not 1950 <= y <= today.year + 8:
+                rep.add_record(key, f"{f.replace('_', ' ').capitalize()} is outside a plausible range.")
+        if r.status == "Completed" and r.expected_year:
+            rep.add_record(key, "Status is Completed but an expected year is set.")
+        if r.status in ("Pursuing", "Appearing") and r.passing_year:
+            rep.add_record(key, f"Status is {r.status} but a passing year is set — an expected year is not a passing year.")
+        if r.start_year and r.passing_year and _num(r.start_year) and _num(r.passing_year) and \
+                _num(r.start_year) > _num(r.passing_year):
+            rep.add_record(key, "Start year is after the passing year.")
+    ordered = [(lvl, next((_num(r.passing_year) for r in edu if r.level == lvl and r.passing_year), None))
+               for lvl in ("ssc", "hsc", "graduation", "post_graduation")]
+    known = [(lvl, y) for lvl, y in ordered if y]
+    for (la, ya), (lb, yb) in zip(known, known[1:]):
+        if ya >= yb:
+            idx = next(i for i, r in enumerate(edu) if r.level == lb)
+            rep.add_record(f"education:{idx}", f"{LEVEL_LABELS[lb]} year should be after {LEVEL_LABELS[la]} year.")
+    for lvl in ("ssc", "hsc"):
+        if edu and not any(r.level == lvl for r in edu):
+            rep.notes.append(f"No {LEVEL_LABELS[lvl]} details found — left blank.")
+    if not edu:
+        rep.notes.append("No education details found.")
+    for i, r in enumerate(exp):
+        key = f"experience:{i}"
+        for n in r.notes:
+            if not n.startswith("Duration was calculated"):
+                rep.add_record(key, n)
+        sy, ey = _num(r.start_date), _num(r.end_date)
+        if sy and ey and sy > ey:
+            rep.add_record(key, "End date is before the start date.")
+        if r.current and r.end_date:
+            rep.add_record(key, "Marked as current but an end date is set.")
+    if extraction:
+        rep.notes.extend(n for n in extraction.notes if n not in rep.notes)
+    elif not exp:
+        rep.notes.append("No professional experience found.")

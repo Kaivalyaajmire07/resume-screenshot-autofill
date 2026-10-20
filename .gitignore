@@ -10,6 +10,3 @@ resume_history.db-shm
 .streamlit/secrets.toml
 .env
 .pytest_cache/
-app_legacy_backup.py
-
-app_legacy_backup.py

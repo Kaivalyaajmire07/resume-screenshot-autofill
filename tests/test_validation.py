@@ -24,7 +24,8 @@ def test_clean_record_only_flags_missing_core():
 def test_blank_core_fields_marked_for_review():
     r = validate(f())
     assert {"first_name", "last_name", "mobile", "email"} <= r.flagged
-    assert len(r.blank) == 36
+    from autofill.fields import FIELD_KEYS
+    assert len(r.blank) == len(FIELD_KEYS)
 
 
 def test_year_ordering_conflict():
