@@ -1,0 +1,20 @@
+Resume Screenshot Autofill — applied changes
+
+Applied the previously discussed minimal patch to the uploaded project while keeping the existing modular architecture and entry point.
+
+Highlights:
+- Improved conservative education extraction and structured qualification display.
+- Qualification rows show the qualification/institution/board and result/marks fields, including blank fields for manual review.
+- Structured review UI updates for education and extraction troubleshooting.
+- Validation and extraction tests updated.
+- Existing PDF processing pipeline and employment splitting retained.
+- Uploaded resume_history.db copied into this project unchanged; SQLite integrity check passed.
+- app.py, requirements.txt, requirements-dev.txt, README.md, .gitignore, and app_legacy_backup.py reflect the latest uploaded files.
+
+Validation:
+- pytest: 66 passed, 1 skipped.
+- SQLite PRAGMA integrity_check: ok.
+
+Important:
+- Tests do not prove OCR will correctly read every real resume. Always review extracted values before saving.
+- Make a separate backup of your local project folder before copying this project over it.

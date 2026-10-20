@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+resume_history.db
+resume_history.db-wal
+resume_history.db-shm
+*.bak
+*.sqlite
+*.sqlite3
+.streamlit/secrets.toml
+.env
+.pytest_cache/
+app_legacy_backup.py
+
+app_legacy_backup.py
