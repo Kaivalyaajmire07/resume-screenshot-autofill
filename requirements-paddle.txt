@@ -1,0 +1,4 @@
+# Optional: only if you want PaddleOCR (set RESUME_OCR_BACKEND=paddle). Heavy; not needed for deployment.
+-r requirements.txt
+paddleocr>=3.0,<4.0
+paddlepaddle==3.0.0

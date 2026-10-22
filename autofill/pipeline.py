@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
@@ -45,42 +46,74 @@ def _read_pdf(att: Attachment, engine: OcrEngine) -> tuple[list[OcrLine], list[s
     return lines, notes
 
 
+def _ocr_one(att: Attachment, idx: int, engine: OcrEngine):
+    """OCR a single attachment. Never raises: returns (lines, warnings, ok, seconds)."""
+    t0 = time.perf_counter()
+    warnings: list[str] = []
+    lines: list[OcrLine] = []
+    try:
+        if pdfs.is_pdf(att.data):
+            lines, pdf_notes = _read_pdf(att, engine)
+            warnings.extend(pdf_notes)
+            dropped = 0
+        else:
+            image = load_image(att.data)
+            lines = engine.recognize(preprocess(image), cache_key=image_hash(att.data))
+            lines, dropped = filter_lines(lines)
+        if dropped:
+            warnings.append(f"{att.name}: ignored {dropped} unreadable low-confidence text fragment(s).")
+        if not lines:
+            warnings.append(f"{att.name}: OCR returned no readable text.")
+        lines = [replace(ln, source_index=idx, source_name=att.name) for ln in lines]
+    except (ImageError, pdfs.PdfError) as exc:
+        warnings.append(f"{att.name}: skipped ({exc}).")
+        lines = []
+    except OcrError as exc:
+        warnings.append(f"{att.name}: OCR engine error — {exc}")
+        lines = []
+    except Exception as exc:  # keep the batch going; surface the reason
+        warnings.append(f"{att.name}: processing failed ({type(exc).__name__}: {exc}).")
+        lines = []
+    return lines, warnings, bool(lines), time.perf_counter() - t0
+
+
 def run_ocr(attachments: list[Attachment], engine: OcrEngine | None = None,
             progress: Callable[[int, int], None] | None = None) -> tuple[list[OcrLine], list[str], int, list[tuple[str, float]]]:
-    """OCR each attachment independently: one bad image never aborts the batch."""
+    """OCR each attachment independently (in parallel when the backend allows): one bad image never aborts the batch."""
     engine = engine or get_engine()
+    total = len(attachments)
+    workers = min(config.OCR_WORKERS, total)
+    results: list = [None] * total
+    done = 0
+    if workers > 1:
+        try:
+            parallel = engine.parallel_ok
+        except Exception:
+            parallel = False
+    else:
+        parallel = False
+    if parallel:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_ocr_one, att, i, engine): i - 1 for i, att in enumerate(attachments, start=1)}
+            for fut in as_completed(futures):
+                results[futures[fut]] = fut.result()
+                done += 1
+                if progress:
+                    progress(done, total)
+    else:
+        for i, att in enumerate(attachments, start=1):
+            results[i - 1] = _ocr_one(att, i, engine)
+            if progress:
+                progress(i, total)
     all_lines: list[OcrLine] = []
     warnings: list[str] = []
     ok = 0
     timings: list[tuple[str, float]] = []
-    total = len(attachments)
-    for idx, att in enumerate(attachments, start=1):
-        t0 = time.perf_counter()
-        try:
-            if pdfs.is_pdf(att.data):
-                lines, pdf_notes = _read_pdf(att, engine)
-                warnings.extend(pdf_notes)
-                dropped = 0
-            else:
-                image = load_image(att.data)
-                lines = engine.recognize(preprocess(image), cache_key=image_hash(att.data))
-                lines, dropped = filter_lines(lines)
-            if dropped:
-                warnings.append(f"{att.name}: ignored {dropped} unreadable low-confidence text fragment(s).")
-            if not lines:
-                warnings.append(f"{att.name}: OCR returned no readable text.")
-            else:
-                ok += 1
-            all_lines.extend(replace(ln, source_index=idx, source_name=att.name) for ln in lines)
-        except (ImageError, pdfs.PdfError) as exc:
-            warnings.append(f"{att.name}: skipped ({exc}).")
-        except OcrError as exc:
-            warnings.append(f"{att.name}: OCR engine error — {exc}")
-        except Exception as exc:  # keep the batch going; surface the reason
-            warnings.append(f"{att.name}: processing failed ({type(exc).__name__}: {exc}).")
-        timings.append((att.name, time.perf_counter() - t0))
-        if progress:
-            progress(idx, total)
+    for att, (lines, warns, good, secs) in zip(attachments, results):  # original order preserved
+        all_lines.extend(lines)
+        warnings.extend(warns)
+        ok += int(good)
+        timings.append((att.name, secs))
     return all_lines, warnings, ok, timings
 
 

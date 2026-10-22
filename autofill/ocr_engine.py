@@ -11,6 +11,7 @@ still mentions oneDNN occurs, the engine is rebuilt once with oneDNN forced off.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -138,6 +139,53 @@ def _build_paddle_ocr():
             kwargs.pop(dropped)
 
 
+class _RapidBackend:
+    """RapidOCR (PP-OCR models on onnxruntime). Thread-safe, so screenshots can run in parallel."""
+
+    thread_safe = True
+
+    def __init__(self):
+        from rapidocr_onnxruntime import RapidOCR  # imported lazily
+
+        self._ocr = RapidOCR()
+
+    def predict(self, array: Any) -> list[OcrLine]:
+        result, _ = self._ocr(array, use_cls=False)  # screenshots are upright: skip the angle classifier
+        lines: list[OcrLine] = []
+        for item in result or []:
+            try:
+                text = str(item[1]).strip()
+                if text:
+                    lines.append(OcrLine(text=text, score=float(item[2]), bbox=_poly_to_bbox(item[0])))
+            except Exception:
+                continue
+        return lines
+
+
+def _build_rapid_ocr():
+    return _RapidBackend()
+
+
+def _rapid_available() -> bool:
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _default_factory():
+    backend = config.OCR_BACKEND
+    if backend == "rapid" or (backend == "auto" and _rapid_available()):
+        try:
+            return _build_rapid_ocr()
+        except Exception as exc:
+            if backend == "rapid":
+                raise OcrError(f"Could not start RapidOCR: {exc}") from exc
+            log.warning("RapidOCR failed (%s); falling back to PaddleOCR", exc)
+    return _build_paddle_ocr()
+
+
 class OcrCache:
     """Tiny thread-safe LRU so re-clicking Extract on the same screenshots is instant."""
 
@@ -168,15 +216,32 @@ class OcrEngine:
     """Lazy, thread-safe PaddleOCR singleton. Pass ``factory`` to inject a fake in tests."""
 
     def __init__(self, factory: Callable[[], Any] | None = None):
-        self._factory = factory or _build_paddle_ocr
+        self._factory = factory or _default_factory
         self._ocr: Any = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.cache = OcrCache()
 
     def _get(self):
         if self._ocr is None:
-            self._ocr = self._factory()
+            with self._lock:
+                if self._ocr is None:
+                    self._ocr = self._factory()
         return self._ocr
+
+    def _get_lock(self):
+        """A real lock for Paddle, a no-op for thread-safe backends (so they run in parallel)."""
+        return contextlib.nullcontext() if self.parallel_ok else self._lock
+
+    @property
+    def parallel_ok(self) -> bool:
+        """True when the loaded backend can be called from several threads at once."""
+        return bool(getattr(self._get(), "thread_safe", False))
+
+    @staticmethod
+    def _to_lines(result: Any) -> list[OcrLine]:
+        if isinstance(result, list) and all(isinstance(x, OcrLine) for x in result):
+            return result
+        return parse_paddle_result(result)
 
     def warm_up(self) -> None:
         """Load models and run one tiny inference so the first real click is fast."""
@@ -192,7 +257,7 @@ class OcrEngine:
             if hit is not None:
                 return hit
         array = to_bgr_array(image)
-        with self._lock:  # Paddle inference objects are not safe for concurrent use
+        with self._get_lock():  # Paddle inference objects are not safe for concurrent use
             try:
                 result = self._get().predict(array)
             except Exception as exc:
@@ -207,7 +272,7 @@ class OcrEngine:
                     if _is_onednn_error(exc2):
                         raise OcrError(ONEDNN_HINT) from exc2
                     raise
-        lines = parse_paddle_result(result)
+        lines = self._to_lines(result)
         if cache_key:
             self.cache.put(cache_key, lines)
         return lines

@@ -39,3 +39,9 @@ OCR_PROFILE = os.environ.get("RESUME_OCR_PROFILE", "fast").strip().lower()
 # Set RESUME_OCR_MKLDNN=1 only if you installed paddlepaddle==3.0.0 (oneDNN is faster but crashes on 3.1+).
 OCR_USE_MKLDNN = os.environ.get("RESUME_OCR_MKLDNN", "0") == "1"
 OCR_CPU_THREADS = int(os.environ.get("RESUME_OCR_THREADS", str(os.cpu_count() or 4)))
+
+# OCR backend: "auto" (RapidOCR/ONNX if installed, else PaddleOCR), "rapid", or "paddle".
+# RapidOCR is several times faster on CPU and much lighter to deploy.
+OCR_BACKEND = os.environ.get("RESUME_OCR_BACKEND", "auto").strip().lower()
+# Screenshots OCR'd in parallel (ONNX backend only). 1 disables parallelism.
+OCR_WORKERS = max(1, int(os.environ.get("RESUME_OCR_WORKERS", str(min(4, os.cpu_count() or 2)))))

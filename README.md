@@ -55,7 +55,13 @@ This is a PaddlePaddle 3.x bug in its oneDNN (MKLDNN) CPU path. The app now disa
 ## Configuration (environment variables)
 `RESUME_DB_PATH`, `RESUME_MAX_UPLOADS` (30), `RESUME_MAX_IMAGE_MB` (20), `RESUME_OCR_MAX_EDGE` (1280), `RESUME_OCR_MIN_SCORE` (0.30), `RESUME_RETENTION_DAYS` (0), `RESUME_OCR_PROFILE` (`fast` default, or `accurate`), `RESUME_OCR_THREADS` (CPU cores), `RESUME_OCR_MKLDNN` (0; set 1 only with paddlepaddle==3.0.0).
 
-## Speed
+## Speed (new: RapidOCR backend)
+The app now uses **RapidOCR (ONNX)** by default (`RESUME_OCR_BACKEND=auto`): no PaddlePaddle needed, much lighter to install and deploy, and no oneDNN crash. Set `RESUME_OCR_BACKEND=paddle` (and `pip install -r requirements-paddle.txt`) to use PaddleOCR instead. `RESUME_OCR_WORKERS` (default up to 4) runs several screenshots in parallel on multi-core machines.
+
+## Deploy (Docker / Hugging Face Spaces)
+`docker build -t autofill . && docker run -p 7860:7860 -v autofill-data:/data autofill`. On Hugging Face choose a Docker Space (port 7860). Mount persistent storage at `/data` or history is lost on restart.
+
+## Speed (Paddle notes)
 Fastest first: text PDFs skip OCR entirely. For screenshots the biggest single gain is `pip install paddlepaddle==3.0.0` and `RESUME_OCR_MKLDNN=1` (oneDNN is off by default because it crashes on 3.1+). Screenshots are now downscaled to 1280px by default (`RESUME_OCR_MAX_EDGE`).
 The default `fast` profile uses PaddleOCR's mobile models without the per-line orientation pass, uses all CPU cores, and loads the models in the background when the app starts. Per-screenshot times are shown under **Timing per screenshot**; identical screenshots are cached. For `accurate` mode set `RESUME_OCR_PROFILE=accurate` (PowerShell: `$env:RESUME_OCR_PROFILE="accurate"` before `streamlit run app.py`).
 
