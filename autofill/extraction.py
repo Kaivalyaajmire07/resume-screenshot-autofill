@@ -236,6 +236,18 @@ class _Extractor:
                     self._set("address", t, i, MEDIUM)
                     addr_idx, addr_end = i, i + 1
                     break
+            if addr_idx is None:  # unlabelled "City, State 444601" / "... - 444601" line near the top
+                state_rx = "|".join(re.escape(st) for st in INDIAN_STATES)
+                for i, t in enumerate(self.texts[:25]):
+                    if self._looks_like_label(t) and not PIN_RE.search(t):
+                        continue
+                    if PIN_RE.search(t) and (re.search(rf"\b(?:{state_rx})\b", t, re.I) or "," in t or "-" in t):
+                        # a header line may carry phone/email too: keep only the address-looking part
+                        part = re.split(r"\s*[|•·]\s*", t)
+                        part = next((x for x in part if PIN_RE.search(x)), t)
+                        self._set("address", part.strip(" ,"), i, LOW)
+                        addr_idx, addr_end = i, i + 1
+                        break
 
         pins: list[tuple[int, str]] = []
         lv_pin = self._label_value(LABELS["pincode"])
